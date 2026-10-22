@@ -70,6 +70,7 @@
   .fleet-item.selected { border-color: var(--accent); color: var(--accent); }
   .fleet-item.placed { opacity: .45; }
   .fleet-item.sunk { text-decoration: line-through; color: var(--hit); opacity: .8; }
+  .music-name { font-size: .8rem; opacity: .75; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .stats { text-align: center; font-size: .8rem; opacity: .75; margin-top: 8px; }
   .hint { text-align: center; font-size: .85rem; opacity: .7; margin: 18px 10px 30px; }
   #overlay { position: fixed; inset: 0; background: rgba(0,0,0,.65); display: none; align-items: center; justify-content: center; z-index: 10; }
@@ -82,7 +83,13 @@
 <header><h1>BEST BATTLESHIP EVER</h1></header>
 <div id="status"></div>
 
-<div class="controls"><button id="sound-btn">Sound: On</button></div>
+<div class="controls">
+  <button id="sound-btn">Sound: On</button>
+  <button id="music-btn">Music: On</button>
+  <button id="music-file-btn">Choose Music File</button>
+  <input type="file" id="music-file" accept="audio/*" hidden>
+  <span id="music-name" class="music-name"></span>
+</div>
 <div class="controls" id="setup-controls">
   <button id="rotate-btn">Rotate (R): Horizontal</button>
   <button id="random-btn">Randomize</button>
@@ -229,6 +236,98 @@ function playBoom(big) {
   osc.connect(og).connect(out);
   osc.start(now); osc.stop(now + dur);
 }
+// ---------- Music (original pirate-style theme) ----------
+const EIGHTH = 0.17, LOOP_EIGHTHS = 96;
+const CHORDS = [
+  [50, "m"], [48, "M"], [46, "M"], [45, "M"], [50, "m"], [48, "M"], [43, "m"], [45, "M"],
+  [41, "M"], [48, "M"], [50, "m"], [46, "M"], [43, "m"], [50, "m"], [45, "M"], [50, "m"],
+];
+const MELODY = [
+  [69,2],[74,1],[77,2],[76,1],  [76,2],[72,1],[67,2],[72,1],  [74,2],[70,1],[65,2],[70,1],  [73,3],[69,3],
+  [74,1],[76,1],[77,1],[81,2],[77,1],  [79,2],[76,1],[72,2],[76,1],  [74,1],[70,1],[67,1],[70,2],[74,1],  [73,2],[76,1],[81,3],
+  [72,2],[69,1],[65,2],[69,1],  [67,1],[72,1],[76,1],[79,3],  [77,2],[76,1],[74,2],[69,1],  [70,3],[74,3],
+  [79,2],[77,1],[74,2],[70,1],  [69,1],[74,1],[77,1],[74,3],  [76,2],[73,1],[69,2],[73,1],  [74,6],
+];
+const MUSIC_EVENTS = (() => {
+  const ev = [];
+  let t = 0;
+  MELODY.forEach(([m, len]) => { ev.push({ t, type: "lead", m, len }); t += len; });
+  CHORDS.forEach(([root, q], bar) => {
+    const b = bar * 6, third = root + (q === "m" ? 3 : 4);
+    ev.push({ t: b, type: "bass", m: root - 12, len: 2.5 }, { t: b + 3, type: "bass", m: root - 5, len: 2.5 });
+    [1, 2, 4, 5].forEach(o => ev.push({ t: b + o, type: "stab", notes: [root + 12, third + 12, root + 19] }));
+    ev.push({ t: b, type: "drum", big: true }, { t: b + 3, type: "drum" });
+  });
+  return ev.sort((a, b) => a.t - b.t);
+})();
+
+let musicOn = true, musicTimer = null, musicGain = null, musicIdx = 0, musicLoopStart = 0, customAudio = null;
+const freq = m => 440 * Math.pow(2, (m - 69) / 12);
+
+function voice(type, f, t, dur, peak, cutoff) {
+  const ctx = audioCtx, o = ctx.createOscillator(), g = ctx.createGain(), lp = ctx.createBiquadFilter();
+  o.type = type; o.frequency.value = f;
+  lp.type = "lowpass"; lp.frequency.value = cutoff;
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(peak, t + 0.012);
+  g.gain.exponentialRampToValueAtTime(peak * 0.5, t + dur * 0.6);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(lp).connect(g).connect(musicGain);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+
+function scheduleMusicEvent(e, t) {
+  if (e.type === "lead") voice("sawtooth", freq(e.m), t, e.len * EIGHTH * 0.95, 0.32, 2400);
+  else if (e.type === "bass") voice("triangle", freq(e.m), t, e.len * EIGHTH, 0.55, 800);
+  else if (e.type === "stab") e.notes.forEach(m => voice("square", freq(m), t, EIGHTH * 0.6, 0.06, 1400));
+  else if (e.type === "drum") {
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.frequency.setValueAtTime(e.big ? 110 : 90, t);
+    o.frequency.exponentialRampToValueAtTime(45, t + 0.15);
+    g.gain.setValueAtTime(e.big ? 0.6 : 0.4, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+    o.connect(g).connect(musicGain);
+    o.start(t); o.stop(t + 0.2);
+  }
+}
+
+function musicTick() {
+  const horizon = audioCtx.currentTime + 0.3;
+  while (true) {
+    const e = MUSIC_EVENTS[musicIdx], t = musicLoopStart + e.t * EIGHTH;
+    if (t > horizon) break;
+    scheduleMusicEvent(e, t);
+    if (++musicIdx >= MUSIC_EVENTS.length) { musicIdx = 0; musicLoopStart += LOOP_EIGHTHS * EIGHTH; }
+  }
+}
+
+function startMusic() {
+  stopMusic();
+  if (!musicOn) return;
+  if (customAudio) { customAudio.currentTime = 0; customAudio.play().catch(() => {}); return; }
+  ensureAudio();
+  if (!audioCtx) return;
+  musicGain = audioCtx.createGain();
+  musicGain.gain.value = 0.22;
+  musicGain.connect(audioCtx.destination);
+  musicIdx = 0;
+  musicLoopStart = audioCtx.currentTime + 0.1;
+  musicTick();
+  musicTimer = setInterval(musicTick, 50);
+}
+
+function stopMusic() {
+  if (customAudio) customAudio.pause();
+  if (musicTimer) { clearInterval(musicTimer); musicTimer = null; }
+  if (musicGain) {
+    const g = musicGain, now = audioCtx.currentTime;
+    g.gain.setValueAtTime(g.gain.value, now);
+    g.gain.linearRampToValueAtTime(0, now + 0.15);
+    setTimeout(() => g.disconnect(), 300);
+    musicGain = null;
+  }
+}
+
 function soundFor(result) { if (result !== "miss") playBoom(result === "sunk"); }
 
 // ---------- AI ----------
@@ -454,6 +553,7 @@ function aiTurn() {
 
 function endGame(won) {
   phase = "over";
+  stopMusic();
   render();
   setStatus(won ? "Victory! The enemy fleet is destroyed." : "Defeat. Your fleet has been sunk.");
   $("overlay-title").textContent = won ? "Victory!" : "Defeat";
@@ -466,6 +566,7 @@ function endGame(won) {
 function startBattle() {
   if (!player.ships.every(s => s.cells.length)) return;
   phase = "battle";
+  startMusic();
   playerTurn = Math.random() < 0.5;
   hoverCells = null;
   render();
@@ -474,6 +575,7 @@ function startBattle() {
 }
 
 function newGame() {
+  stopMusic();
   player = newBoard(); enemy = newBoard();
   randomize(enemy);
   phase = "placing"; horizontal = true; selectedShip = 0; playerTurn = true;
@@ -493,6 +595,25 @@ $("restart-btn").onclick = newGame;
 $("again-btn").onclick = newGame;
 $("sound-btn").onclick = () => { soundOn = !soundOn; $("sound-btn").textContent = `Sound: ${soundOn ? "On" : "Off"}`; };
 document.addEventListener("pointerdown", ensureAudio);
+$("music-btn").onclick = () => {
+  musicOn = !musicOn;
+  $("music-btn").textContent = `Music: ${musicOn ? "On" : "Off"}`;
+  if (musicOn && phase === "battle") startMusic(); else stopMusic();
+};
+$("music-file-btn").onclick = () => $("music-file").click();
+$("music-file").onchange = e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const wasPlaying = phase === "battle" && musicOn;
+  stopMusic();
+  if (customAudio) URL.revokeObjectURL(customAudio.src);
+  customAudio = new Audio(URL.createObjectURL(file));
+  customAudio.loop = true;
+  customAudio.volume = 0.5;
+  $("music-name").textContent = "♪ " + file.name;
+  $("music-name").title = file.name;
+  if (wasPlaying) startMusic();
+};
 document.addEventListener("keydown", e => {
   ensureAudio();
   if (phase === "placing" && (e.key === "r" || e.key === "R")) {
