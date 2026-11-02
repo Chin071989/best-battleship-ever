@@ -292,11 +292,13 @@ function scheduleMusicEvent(e, t) {
 }
 
 function musicTick() {
-  const horizon = audioCtx.currentTime + 0.3;
+  const now = audioCtx.currentTime, horizon = now + 0.3, loopLen = LOOP_EIGHTHS * EIGHTH;
+  // Background tabs throttle timers; skip notes that are already late instead of playing them all at once.
+  if (now - musicLoopStart > loopLen * 2) musicLoopStart += Math.floor((now - musicLoopStart) / loopLen - 1) * loopLen;
   while (true) {
     const e = MUSIC_EVENTS[musicIdx], t = musicLoopStart + e.t * EIGHTH;
     if (t > horizon) break;
-    scheduleMusicEvent(e, t);
+    if (t >= now - 0.05) scheduleMusicEvent(e, t);
     if (++musicIdx >= MUSIC_EVENTS.length) { musicIdx = 0; musicLoopStart += LOOP_EIGHTHS * EIGHTH; }
   }
 }
@@ -393,7 +395,7 @@ function aiPick(board, difficulty) {
 }
 
 // ---------- Game state & rendering ----------
-let lastSunk = null;
+let lastSunk = null, aiTimer = null;
 let player, enemy, phase, horizontal, selectedShip, playerTurn, lastPlayerShot, lastAiShot, hoverCells;
 
 function buildGrid(el, onClick, onHover) {
@@ -493,7 +495,7 @@ function nextUnplaced() {
 function onPlayerClick(r, c) {
   if (phase !== "placing") return;
   const existing = player.owner[key(r, c)];
-  if (existing !== -1 && existing !== selectedShip) {
+  if (existing !== -1) {
     selectedShip = existing;
     const s = player.ships[existing];
     horizontal = s.cells.length > 1 ? s.cells[0][0] === s.cells[1][0] : horizontal;
@@ -531,7 +533,7 @@ function onEnemyClick(r, c) {
   if (allSunk(enemy)) return endGame(true);
   playerTurn = false;
   render();
-  setTimeout(aiTurn, 650);
+  aiTimer = setTimeout(aiTurn, 650);
 }
 
 function aiTurn() {
@@ -560,7 +562,7 @@ function endGame(won) {
   $("overlay-text").textContent = won
     ? `You sank the enemy fleet in ${enemy.shotCount} shots (${pct(enemy)} accuracy).`
     : `The enemy sank your fleet in ${player.shotCount} shots. Their remaining ships are now revealed.`;
-  setTimeout(() => $("overlay").classList.add("show"), 500);
+  setTimeout(() => { if (phase === "over") $("overlay").classList.add("show"); }, 500);
 }
 
 function startBattle() {
@@ -571,11 +573,12 @@ function startBattle() {
   hoverCells = null;
   render();
   if (playerTurn) setStatus("Battle started. You go first: fire at Enemy Waters!");
-  else { setStatus("Battle started. Enemy goes first..."); setTimeout(aiTurn, 800); }
+  else { setStatus("Battle started. Enemy goes first..."); aiTimer = setTimeout(aiTurn, 800); }
 }
 
 function newGame() {
   stopMusic();
+  clearTimeout(aiTimer);
   player = newBoard(); enemy = newBoard();
   randomize(enemy);
   phase = "placing"; horizontal = true; selectedShip = 0; playerTurn = true;
